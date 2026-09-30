@@ -1,0 +1,766 @@
+import { useLanguage } from './context/LanguageContext';
+import React, { useState, useEffect } from "react";
+import { Header } from "./components/Header";
+import { SearchFilters } from "./components/SearchFilters";
+import { InstantAudit } from "./components/InstantAudit";
+import { ProspectCard } from "./components/ProspectCard";
+import { PipelineView } from "./components/PipelineView";
+import { RegistersGuideModal } from "./components/RegistersGuideModal";
+import { RefinePitchModal } from "./components/RefinePitchModal";
+import { ApiKeyModal } from "./components/ApiKeyModal";
+import { SearchHistory } from "./components/SearchHistory";
+import { Prospect, SearchFilterState, SearchHistoryItem, TabType, AIProviderId } from "./types";
+import { SLOVAK_INDUSTRIES, SLOVAK_REGIONS } from "./data/slovakData";
+import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "./data/aiProviders";
+import { safeFetchJson } from "./utils/api";
+import { normalizeProspect } from './utils/prospects';
+import { useAuth } from "./context/AuthContext";
+import {
+  Sparkles,
+  Building2,
+  AlertCircle,
+  CheckCircle2,
+  ArrowRight,
+  Filter,
+  RefreshCw,
+  Search,
+  Globe,
+  SlidersHorizontal,
+} from "lucide-react";
+
+export default function App() {
+  const { language: uiLanguage, t } = useLanguage();
+  const { user, logout } = useAuth();
+  const [activeTab, setActiveTab] = useState<TabType>("discover");
+
+  // Search Filter State
+  const [filters, setFilters] = useState<SearchFilterState>({
+    region: SLOVAK_REGIONS[0],
+    industry: SLOVAK_INDUSTRIES[0].name,
+    minEmployees: 3,
+    maxEmployees: 50,
+    count: 3,
+    customKeywords: "",
+    language: uiLanguage,
+  });
+
+  useEffect(() => {
+    setFilters(previous => ({ ...previous, language: uiLanguage }));
+  }, [uiLanguage]);
+
+  // Discovered Prospects
+  const [prospects, setProspects] = useState<Prospect[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
+
+  // Saved Pipeline Prospects (persisted per-user in the cloud)
+  const [savedProspects, setSavedProspects] = useState<Prospect[]>([]);
+
+  // Modal State for Refining Outreach Pitch
+  const [refiningProspect, setRefiningProspect] = useState<Prospect | null>(null);
+  const [isRefineModalOpen, setIsRefineModalOpen] = useState(false);
+
+  // Search History State
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>(() => {
+    try {
+      const raw = localStorage.getItem("slovak_b2b_search_history");
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Save search history to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem("slovak_b2b_search_history", JSON.stringify(searchHistory));
+    } catch (e) {
+      console.error("Failed to save search history to localStorage", e);
+    }
+  }, [searchHistory]);
+
+  const addSearchHistory = (newItem: Omit<SearchHistoryItem, "id" | "timestamp">) => {
+    const item: SearchHistoryItem = {
+      ...newItem,
+      id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: Date.now(),
+    };
+    setSearchHistory((prev) => {
+      const filtered = prev.filter(
+        (p) => !(p.title === item.title && p.type === item.type)
+      );
+      return [item, ...filtered].slice(0, 15);
+    });
+  };
+
+  const handleRemoveHistoryItem = (id: string) => {
+    setSearchHistory((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const handleClearHistory = () => {
+    setSearchHistory([]);
+    try {
+      localStorage.removeItem("slovak_b2b_search_history");
+    } catch {
+      // Ignore
+    }
+  };
+
+  // AI Provider & Key State
+  const [activeProvider, setActiveProvider] = useState<AIProviderId>(() => {
+    try {
+      const storedProvider = localStorage.getItem("slovak_leadgen_active_provider");
+      return storedProvider && AI_PROVIDERS.some((p) => p.id === storedProvider)
+        ? (storedProvider as AIProviderId)
+        : DEFAULT_AI_PROVIDER;
+    } catch {
+      return DEFAULT_AI_PROVIDER;
+    }
+  });
+
+  const [providerKeys, setProviderKeys] = useState<Record<AIProviderId, string>>(() => {
+    try {
+      const saved = localStorage.getItem("slovak_leadgen_provider_keys");
+      const parsed = saved ? JSON.parse(saved) : {};
+      const legacyGemini = localStorage.getItem("slovak_leadgen_gemini_key");
+      if (legacyGemini && !parsed.gemini) {
+        parsed.gemini = legacyGemini;
+      }
+      return {
+        gemini: "",
+        anthropic: "",
+        perplexity: "",
+        nemotron: "",
+        deepseek: "",
+        openai: "",
+        grok: "",
+        ...parsed,
+      };
+    } catch {
+      return {
+        gemini: "",
+        anthropic: "",
+        perplexity: "",
+        nemotron: "",
+        deepseek: "",
+        openai: "",
+        grok: "",
+      };
+    }
+  });
+
+  const [providerModels, setProviderModels] = useState<Record<AIProviderId, string>>(() => {
+    try {
+      const saved = localStorage.getItem("slovak_leadgen_provider_models");
+      const parsed = saved ? JSON.parse(saved) : {};
+      const defaults: Record<AIProviderId, string> = {
+        gemini: "gemini-2.5-flash",
+        anthropic: "claude-3-5-sonnet-20241022",
+        perplexity: "sonar",
+        nemotron: "nvidia/llama-3.1-nemotron-70b-instruct",
+        deepseek: "deepseek-chat",
+        openai: "gpt-4o",
+        grok: "grok-2-latest",
+      };
+      AI_PROVIDERS.forEach((p) => {
+        if (!defaults[p.id]) defaults[p.id] = p.defaultModel;
+      });
+      const models = { ...defaults, ...parsed };
+      AI_PROVIDERS.forEach((p) => {
+        if (!p.models.includes(models[p.id])) models[p.id] = p.defaultModel;
+      });
+      return models;
+    } catch {
+      return {
+        gemini: "gemini-2.5-flash",
+        anthropic: "claude-3-5-sonnet-20241022",
+        perplexity: "sonar",
+        nemotron: "nvidia/llama-3.1-nemotron-70b-instruct",
+        deepseek: "deepseek-chat",
+        openai: "gpt-4o",
+        grok: "grok-2-latest",
+      };
+    }
+  });
+
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
+
+  const currentProviderConfig =
+    AI_PROVIDERS.find((p) => p.id === activeProvider) || AI_PROVIDERS[0];
+  const activeApiKey = providerKeys[activeProvider] || "";
+  const activeModel = providerModels[activeProvider] || currentProviderConfig.defaultModel;
+
+  const handleSelectActiveProvider = (provider: AIProviderId) => {
+    setActiveProvider(provider);
+    try {
+      localStorage.setItem("slovak_leadgen_active_provider", provider);
+    } catch (e) {
+      console.error("Failed to save active provider to localStorage", e);
+    }
+  };
+
+  const handleSaveProviderKey = (provider: AIProviderId, key: string) => {
+    setProviderKeys((prev) => {
+      const updated = { ...prev, [provider]: key };
+      try {
+        localStorage.setItem("slovak_leadgen_provider_keys", JSON.stringify(updated));
+        if (provider === "gemini") {
+          localStorage.setItem("slovak_leadgen_gemini_key", key);
+        }
+      } catch (e) {
+        console.error("Failed to save provider keys to localStorage", e);
+      }
+      return updated;
+    });
+  };
+
+  const handleSelectProviderModel = (provider: AIProviderId, model: string) => {
+    setProviderModels((prev) => {
+      const updated = { ...prev, [provider]: model };
+      try {
+        localStorage.setItem("slovak_leadgen_provider_models", JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to save provider models to localStorage", e);
+      }
+      return updated;
+    });
+  };
+
+  // Load the user's saved pipeline from the backend on mount.
+  useEffect(() => {
+    const loadPipeline = async () => {
+      try {
+        const data = await safeFetchJson<{ success?: boolean; leads?: Prospect[] }>("/api/leads");
+        if (data.success && Array.isArray(data.leads)) {
+          setSavedProspects(data.leads.filter(p => p && typeof p.id === 'string').map(normalizeProspect));
+        }
+      } catch (e) {
+        console.warn("Failed to load pipeline from server", e);
+      }
+    };
+    loadPipeline();
+  }, []);
+
+  // Initial load: Fetch default sample search on mount if empty
+  useEffect(() => {
+    const loadInitialLeads = async () => {
+      setIsLoading(true);
+      try {
+        const data = await safeFetchJson<{
+          success?: boolean;
+          isMock?: boolean;
+          prospects?: Prospect[];
+        }>("/api/leads/search", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-ai-provider": activeProvider,
+            "x-ai-model": activeModel,
+            ...(activeApiKey ? { [`x-${activeProvider}-api-key`]: activeApiKey, "x-custom-api-key": activeApiKey } : {}),
+          },
+          body: JSON.stringify({
+            provider: activeProvider,
+            apiKey: activeApiKey || undefined,
+            model: activeModel,
+            region: filters.region,
+            industry: filters.industry,
+            minEmployees: filters.minEmployees,
+            maxEmployees: filters.maxEmployees,
+            count: 3,
+            language: uiLanguage,
+          }),
+        });
+
+        if (data.success && Array.isArray(data.prospects)) {
+          setProspects(data.prospects.map(normalizeProspect));
+          if (data.isMock) {
+            setStatusNotice(
+              "Ukážkové výsledky — nejde o živé vyhľadávanie ani overené kontakty. Pre živé výsledky nastavte AI kľúč."
+            );
+          }
+        }
+      } catch (err: any) {
+        console.warn("Notice loading initial leads:", err);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadInitialLeads();
+  }, []);
+
+  // Execute Search (supports passing specific filters or using state)
+  const executeSearch = async (overrideFilters?: SearchFilterState) => {
+    const activeFilters = overrideFilters || filters;
+    setIsLoading(true);
+    setErrorMessage(null);
+    setStatusNotice(null);
+
+    try {
+      const data = await safeFetchJson<{
+        success?: boolean;
+        error?: string;
+        isMock?: boolean;
+        prospects?: Prospect[];
+      }>("/api/leads/search", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-ai-provider": activeProvider,
+          "x-ai-model": activeModel,
+          ...(activeApiKey ? { [`x-${activeProvider}-api-key`]: activeApiKey, "x-custom-api-key": activeApiKey } : {}),
+        },
+        body: JSON.stringify({
+          provider: activeProvider,
+          apiKey: activeApiKey || undefined,
+          model: activeModel,
+          region: activeFilters.region,
+          industry: activeFilters.industry,
+          minEmployees: activeFilters.minEmployees,
+          maxEmployees: activeFilters.maxEmployees,
+          count: activeFilters.count,
+          customKeywords: activeFilters.customKeywords,
+          language: activeFilters.language,
+        }),
+      });
+
+      if (data.success && Array.isArray(data.prospects)) {
+        setProspects(data.prospects.map(normalizeProspect));
+
+        // Record into persistent Search History
+        addSearchHistory({
+          type: "market_discovery",
+          title: `${activeFilters.region} • ${activeFilters.industry}`,
+          subtitle: `${activeFilters.minEmployees}–${activeFilters.maxEmployees} zam.${
+            activeFilters.customKeywords ? ` • ${activeFilters.customKeywords}` : ""
+          }`,
+          filters: { ...activeFilters },
+          resultsCount: data.prospects.length,
+        });
+
+        if (data.isMock) {
+          setStatusNotice(
+            "Ukážkové výsledky — nejde o živé vyhľadávanie ani overené kontakty. Pre živé výsledky nastavte AI kľúč."
+          );
+        }
+      } else {
+        throw new Error(data.error || t("Nepodarilo sa načítať prospekty"));
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || t("Chyba pri vyhľadávaní firiem"));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSearch = () => {
+    executeSearch();
+  };
+
+  // Handle Instant Single Company Audit
+  const handleInstantAudit = async (
+    urlOrName: string,
+    industry: string,
+    language: "sk" | "en"
+  ) => {
+    setIsLoading(true);
+    setErrorMessage(null);
+    setStatusNotice(null);
+
+    try {
+      const data = await safeFetchJson<{
+        success?: boolean;
+        error?: string;
+        prospect?: Prospect;
+        isMock?: boolean;
+      }>("/api/audit/company", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-ai-provider": activeProvider,
+          "x-ai-model": activeModel,
+          ...(activeApiKey ? { [`x-${activeProvider}-api-key`]: activeApiKey, "x-custom-api-key": activeApiKey } : {}),
+        },
+        body: JSON.stringify({
+          provider: activeProvider,
+          apiKey: activeApiKey || undefined,
+          model: activeModel,
+          urlOrName,
+          industry,
+          language,
+        }),
+      });
+
+      if (data.success && data.prospect) {
+        // Prepend audit result to the top of prospects list and switch to discover/results view
+        setProspects((prev) => [normalizeProspect(data.prospect), ...prev.filter((p) => p.id !== data.prospect.id)]);
+        setActiveTab("discover");
+        setStatusNotice(data.isMock ? "Ukážkový audit — nejde o overenú analýzu webu." : t("Hĺbkový audit pre {0} bol úspešne dokončený.", data.prospect.companyName));
+
+        // Record into Search History
+        addSearchHistory({
+          type: "company_audit",
+          title: `Audit: ${data.prospect.companyName || urlOrName}`,
+          subtitle: `${industry} • ${data.prospect.website || urlOrName}`,
+          auditTarget: {
+            urlOrName,
+            industry,
+            language,
+          },
+          resultsCount: 1,
+        });
+      } else {
+        throw new Error(data.error || t("Audit sa nepodarilo vykonať"));
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || t("Chyba pri audite firmy"));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handle click on recent search history item
+  const handleSelectHistoryItem = (item: SearchHistoryItem) => {
+    if (item.type === "market_discovery" && item.filters) {
+      setFilters({ ...item.filters, language: uiLanguage });
+      setActiveTab("discover");
+      executeSearch({ ...item.filters, language: uiLanguage });
+    } else if (item.type === "company_audit" && item.auditTarget) {
+      setActiveTab("audit");
+      handleInstantAudit(
+        item.auditTarget.urlOrName,
+        item.auditTarget.industry,
+        uiLanguage
+      );
+    }
+  };
+
+  // Toggle Save / Unsave to Pipeline (persisted to backend)
+  const handleToggleSave = async (prospect: Prospect) => {
+    const exists = savedProspects.some((p) => p.id === prospect.id);
+    if (exists) {
+      const prev = savedProspects;
+      setSavedProspects((s) => s.filter((p) => p.id !== prospect.id));
+      try {
+        await safeFetchJson(`/api/leads/${encodeURIComponent(prospect.id)}`, { method: "DELETE" });
+      } catch (e: any) {
+        setSavedProspects(prev); // rollback
+        setErrorMessage(t("Nepodarilo sa odstrániť prospekt z Pipeline."));
+      }
+    } else {
+      const optimistic = { ...prospect, status: "saved" as Prospect["status"] };
+      setSavedProspects((s) => [optimistic, ...s]);
+      try {
+        const data = await safeFetchJson<{ success?: boolean; lead?: Prospect }>("/api/leads", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lead: prospect }),
+        });
+        if (data.lead) {
+          setSavedProspects((s) => s.map((p) => (p.id === prospect.id ? normalizeProspect(data.lead!) : p)));
+        }
+      } catch (e: any) {
+        setSavedProspects((s) => s.filter((p) => p.id !== prospect.id)); // rollback
+        setErrorMessage(t("Nepodarilo sa uložiť prospekt do Pipeline."));
+      }
+    }
+  };
+
+  // Update Status in Pipeline (persisted for saved prospects)
+  const handleUpdateStatus = (id: string, newStatus: Prospect["status"]) => {
+    setSavedProspects((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, status: newStatus } : p))
+    );
+    setProspects((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, status: newStatus } : p))
+    );
+    if (savedProspects.some((p) => p.id === id)) {
+      safeFetchJson(`/api/leads/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      }).catch(() => setErrorMessage(t("Stav sa nepodarilo uložiť na server.")));
+    }
+  };
+
+  // Open Pitch Refinement Modal
+  const handleOpenRefineModal = (prospect: Prospect) => {
+    setRefiningProspect(prospect);
+    setIsRefineModalOpen(true);
+  };
+
+  // Save Updated Pitch from Modal (persist to backend for saved prospects)
+  const handleSaveUpdatedPitch = (prospectId: string, subject: string, body: string, language: "sk" | "en") => {
+    setProspects((prev) =>
+      prev.map((p) =>
+        p.id === prospectId
+          ? { ...p, coldOutreach: { ...p.coldOutreach, subject, body, language } }
+          : p
+      )
+    );
+    setSavedProspects((prev) =>
+      prev.map((p) =>
+        p.id === prospectId
+          ? { ...p, coldOutreach: { ...p.coldOutreach, subject, body, language } }
+          : p
+      )
+    );
+    if (savedProspects.some((p) => p.id === prospectId)) {
+      safeFetchJson(`/api/leads/${encodeURIComponent(prospectId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ coldOutreach: { subject, body, language } }),
+      }).catch(() => {});
+    }
+  };
+
+  // Remove a single prospect from the cloud pipeline.
+  const handleRemoveFromPipeline = async (id: string) => {
+    const prev = savedProspects;
+    setSavedProspects((s) => s.filter((p) => p.id !== id));
+    try {
+      await safeFetchJson(`/api/leads/${encodeURIComponent(id)}`, { method: "DELETE" });
+    } catch {
+      setSavedProspects(prev);
+      setErrorMessage(t("Nepodarilo sa odstrániť prospekt z Pipeline."));
+    }
+  };
+
+  // Clear the entire cloud pipeline.
+  const handleClearPipeline = async () => {
+    const prev = savedProspects;
+    setSavedProspects([]);
+    try {
+      await safeFetchJson("/api/leads", { method: "DELETE" });
+    } catch {
+      setSavedProspects(prev);
+      setErrorMessage(t("Nepodarilo sa vyprázdniť Pipeline."));
+    }
+  };
+
+  // Email the logged-in user their own saved pipeline (transactional).
+  const handleEmailMyLeads = async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const data = await safeFetchJson<{ success?: boolean; count?: number; sentTo?: string }>(
+        "/api/leads/email-me",
+        { method: "POST" }
+      );
+      return {
+        ok: true,
+        message: t("Poslali sme {0} uložených firiem na {1}.", data.count ?? "", data.sentTo || "váš e-mail"),
+      };
+    } catch (e: any) {
+      return { ok: false, message: e?.message || t("E-mail sa nepodarilo odoslať.") };
+    }
+  };
+
+  return (
+    <div data-testid="app-div-1" className="min-h-screen bg-stone-100/70 text-stone-900 font-sans flex flex-col selection:bg-blue-100 selection:text-blue-900">
+      {/* Top Header */}
+      <Header
+        activeTab={activeTab}
+        onTabChange={(tab) => {
+          setActiveTab(tab);
+          setErrorMessage(null);
+        }}
+        savedCount={savedProspects.length}
+        onOpenApiKeyModal={() => setIsApiKeyModalOpen(true)}
+        hasCustomKey={Boolean(activeApiKey && activeApiKey.trim().length > 5)}
+        activeProviderName={currentProviderConfig.name}
+        activeModelName={activeModel}
+        userName={user?.name}
+        userEmail={user?.email}
+        onLogout={logout}
+      />
+
+      {/* Main Container */}
+      <main data-testid="app-main-2" className="flex-1 max-w-7xl w-full mx-auto px-3.5 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-6 pb-24 md:pb-8">
+        {/* Status Notice Banner (Dismissible or informative) */}
+        {statusNotice && (
+          <div data-testid="app-div-3" className="p-4 rounded-xl bg-blue-50 border border-blue-200 text-blue-900 text-xs sm:text-sm flex items-start gap-3">
+            <CheckCircle2 className="w-4 h-4 text-blue-700 shrink-0 mt-0.5" />
+            <div data-testid="status-notice" className="flex-1 leading-relaxed">{t(statusNotice)}</div>
+            <button data-testid="app-button-4"
+              onClick={() => setStatusNotice(null)}
+              className="text-blue-600 hover:text-blue-800 font-bold ml-2 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Error Alert */}
+        {errorMessage && (
+          <div data-testid="app-div-5" className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs sm:text-sm flex items-start gap-3">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div data-testid="app-error" role="alert" className="flex-1 leading-relaxed">{t(errorMessage)}</div>
+            <button data-testid="app-button-6"
+              onClick={() => setErrorMessage(null)}
+              className="text-rose-600 hover:text-rose-800 font-bold ml-2 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Tab 1: Market Discovery */}
+        {activeTab === "discover" && (
+          <div data-testid="app-div-7" className="space-y-8">
+            {/* Recent Search History */}
+            <SearchHistory
+              history={searchHistory}
+              onSelect={handleSelectHistoryItem}
+              onRemove={handleRemoveHistoryItem}
+              onClear={handleClearHistory}
+            />
+
+            {/* Search Filters Section */}
+            <SearchFilters
+              filters={filters}
+              onChange={setFilters}
+              onSearch={handleSearch}
+              isLoading={isLoading}
+            />
+
+            {/* Results Section */}
+            <div data-testid="app-div-8" className="space-y-4">
+              <div data-testid="app-div-9" className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-stone-200">
+                <div data-testid="app-div-10">
+                  <h3 data-testid="app-h3-11" className="text-base font-bold text-stone-900">
+                    {t("Nájdené B2B prospekty & audity webov (")}{prospects.length})
+                  </h3>
+                  <p data-testid="app-p-12" className="text-xs text-stone-500">
+                    {t("Výsledky spĺňajúce kritérium SMB (3–50 zamestnancov) s auditom digitálnych bariér a draftom cold emailu.")} </p>
+                </div>
+
+                <div data-testid="app-div-13" className="flex items-center gap-2 text-xs text-stone-600 font-medium">
+                  <span data-testid="app-span-14" className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                  <span data-testid="app-span-15">{t("Výstupná schéma je pripravená na okamžité kopírovanie")}</span>
+                </div>
+              </div>
+
+              {/* List of Prospects */}
+              {isLoading && prospects.length === 0 ? (
+                <div data-testid="app-div-16" className="p-12 text-center bg-white rounded-2xl border border-stone-200">
+                  <div data-testid="app-div-17" className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+                  <p data-testid="app-p-18" className="text-sm font-semibold text-stone-800">
+                    {t("Skenujem slovenský trh, registre ORSR & FinStat a webové stránky...")} </p>
+                  <p data-testid="app-p-19" className="text-xs text-stone-500 mt-1">
+                    {t("Analyzujem formuláre, cenníky v PDF, rýchlosť a dohľadávam konateľov firiem.")} </p>
+                </div>
+              ) : (
+                <div data-testid="app-div-20" className="space-y-6">
+                  {prospects.map((prospect) => (
+                    <ProspectCard
+                      key={prospect.id}
+                      prospect={prospect}
+                      isSaved={savedProspects.some((p) => p.id === prospect.id)}
+                      onToggleSave={handleToggleSave}
+                      onUpdateStatus={handleUpdateStatus}
+                      onOpenRefineModal={handleOpenRefineModal}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Tab 2: Instant Single Web/Company Audit */}
+        {activeTab === "audit" && (
+          <div data-testid="app-div-21" className="space-y-8">
+            {/* Recent Search & Audit History */}
+            <SearchHistory
+              history={searchHistory}
+              onSelect={handleSelectHistoryItem}
+              onRemove={handleRemoveHistoryItem}
+              onClear={handleClearHistory}
+            />
+
+            <InstantAudit onAudit={handleInstantAudit} isLoading={isLoading} />
+
+            {/* Display Most Recent Audits if any */}
+            {prospects.length > 0 && (
+              <div data-testid="app-div-22" className="space-y-4">
+                <h3 data-testid="app-h3-23" className="text-base font-bold text-stone-900">
+                  {t("Nedávno auditované slovenské firmy")} </h3>
+                <div data-testid="app-div-24" className="space-y-6">
+                  {prospects.slice(0, 2).map((prospect) => (
+                    <ProspectCard
+                      key={prospect.id}
+                      prospect={prospect}
+                      isSaved={savedProspects.some((p) => p.id === prospect.id)}
+                      onToggleSave={handleToggleSave}
+                      onUpdateStatus={handleUpdateStatus}
+                      onOpenRefineModal={handleOpenRefineModal}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tab 3: Saved Pipeline */}
+        {activeTab === "pipeline" && (
+          <PipelineView
+            savedProspects={savedProspects}
+            onRemoveFromPipeline={handleRemoveFromPipeline}
+            onUpdateStatus={handleUpdateStatus}
+            onOpenRefineModal={handleOpenRefineModal}
+            onEmailMyLeads={handleEmailMyLeads}
+            onClearAll={() => {
+              if (window.confirm(t("Naozaj chcete vymazať všetky uložené prospekty z Pipeline?"))) {
+                handleClearPipeline();
+              }
+            }}
+          />
+        )}
+
+        {/* Tab 4: Registers & Methodology Guide */}
+        {activeTab === "guide" && <RegistersGuideModal />}
+      </main>
+
+      {/* Footer */}
+      <footer data-testid="app-footer-25" className="mt-auto border-t border-stone-200/90 bg-white py-6 mb-16 md:mb-0">
+        <div data-testid="app-div-26" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-stone-500">
+          <div data-testid="app-div-27" className="flex items-center gap-2">
+            <Building2 className="w-4 h-4 text-blue-700" />
+            <span data-testid="app-span-28" className="font-semibold text-stone-800">Slovak B2B Lead Generator & Web Audit</span>
+            <span data-testid="app-span-29">{t("– špecializované pre slovenské malé a stredné podniky (3–50 zamestnancov)")}</span>
+          </div>
+          <div data-testid="app-div-30" className="flex items-center gap-4 text-stone-500">
+            <span data-testid="app-span-31">{t("Zdroje: ORSR.sk • FinStat.sk • Overit.sk • Web Inspection")}</span>
+          </div>
+        </div>
+      </footer>
+
+      {/* Modal for Pitch Customization */}
+      <RefinePitchModal
+        prospect={refiningProspect}
+        isOpen={isRefineModalOpen}
+        onClose={() => {
+          setIsRefineModalOpen(false);
+          setRefiningProspect(null);
+        }}
+        onSaveUpdatedPitch={handleSaveUpdatedPitch}
+        activeProvider={activeProvider}
+        activeApiKey={activeApiKey}
+        activeModel={activeModel}
+      />
+
+      {/* Modal for Custom API Key Settings */}
+      <ApiKeyModal
+        isOpen={isApiKeyModalOpen}
+        onClose={() => setIsApiKeyModalOpen(false)}
+        activeProvider={activeProvider}
+        onSelectActiveProvider={handleSelectActiveProvider}
+        providerKeys={providerKeys}
+        onSaveProviderKey={handleSaveProviderKey}
+        providerModels={providerModels}
+        onSelectProviderModel={handleSelectProviderModel}
+      />
+    </div>
+  );
+}
